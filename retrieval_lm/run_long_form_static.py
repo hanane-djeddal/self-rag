@@ -1,5 +1,6 @@
 import argparse
 import jsonlines
+import pandas as pd
 import datasets
 from transformers import AutoTokenizer
 import numpy as np
@@ -14,7 +15,7 @@ from utils import (
     postprocess,
     fix_spacing,
 )
-from retrieve_bm25_monoT5 import Retriever
+
 import os
 
 os.environ["HTTP_PROXY"] = "http://hacienda:3128"
@@ -248,7 +249,7 @@ def call_model_beam_batch(
         special_tokens = list(rel_tokens.keys())
     if ret_tokens is not None:
         special_tokens += list(ret_tokens.keys())
-
+    prediction_tree = {}
     if mode == "no_retrieval":
         sampling_params = SamplingParams(
             temperature=0.0, top_p=1, max_tokens=max_new_tokens
@@ -547,8 +548,6 @@ def main():
         tokenizer, use_grounding=args.use_grounding, use_utility=args.use_utility
     )
 
-    # ranker = Retriever(index="miracl-v1.0-en")
-
     if args.world_size is not None:
         model = LLM(
             model=args.model_name,
@@ -587,12 +586,27 @@ def main():
             ignore_cont=args.ignore_cont,
         )
 
-    # input_path = args.input_file
-    # if input_path.endswith(".json"):
-    #     input_data = json.load(open(input_path))
-    # else:
-    #     input_data = load_jsonlines(input_path)
-    input_data = datasets.load_dataset("miracl/hagrid", split="dev")
+    input_path = args.input_file
+    query_column = "question"
+    docs_column = "docs"
+    if input_path.endswith(".csv"):
+        data = pd.read_csv(
+            input_path,
+            converters={
+                "retrieved_passages": eval,
+                "gold_quotes": eval,
+                "answers": eval,
+            },
+            index_col=0,
+        )
+        input_data = data.to_dict("records")
+        query_column = "query"
+        docs_column = "retrieved_passages"
+    # input_data = datasets.load_dataset("miracl/hagrid", split="dev")
+    elif input_path.endswith(".json"):
+        input_data = json.load(open(input_path))
+    else:
+        input_data = load_jsonlines(input_path)
 
     if args.task is not None and args.task == "factscore":
         new_results = []
@@ -628,15 +642,11 @@ def main():
             "azure_filter_fail": "",
         }
         for instance_idx, item in enumerate(input_data):
-            if instance_idx == 5:
-                break
-            prompt = item["query"]
-            ctxs = item["quotes"][: args.ndocs]
+            prompt = item[query_column]  # item["query"]
+            ctxs = item[docs_column][
+                : args.ndocs
+            ]  # item["retrieved_passages"][: args.ndocs]
             instructions = TASK_INST[args.task]
-            # docids, doc_text = ranker.search(item["query"])
-            # ctxs = doc_text
-            # if instance_idx == 0:
-            #    print(doc_text[0])
             prev_gen = []
             prompt = instructions + "## Input:\n\n" + prompt
             final_pred, intermediate = generate(
@@ -681,6 +691,8 @@ def main():
             item["docs"] = docs
             if "original_splitted_sentences" in intermediate:
                 item["intermediate"] = intermediate["original_splitted_sentences"][0]
+            # item["retrieved_passages"] = item["retrieved_passages"][: args.ndocs]
+            # new_results["data"].append(item.to_dict())
             new_results["data"].append(item)
 
             if instance_idx % 10 == 0:
